@@ -1,118 +1,159 @@
-use std::path::Path;
-use cpal::SampleFormat;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::probe::Hint;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::audio::SampleBuffer;
-use std::fs::File;
-#[derive(Debug)]
-
-pub struct METADATA {
-    pub sample_format: SampleFormat,
-    pub sample_rate: u32,
-    pub channels: u16,
+use std::thread;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::collections::VecDeque;
+use anyhow::Result;
+use crate::output;
+use crate::decoder::METADATA;
+pub struct SoundTask {
+    id: usize,
+    samples: Arc<Vec<f32>>,
+    duration: Duration,
+    metadata: METADATA,
+    stereo: bool,
 }
 
-impl METADATA {
-    pub(crate) fn clone(&self) -> METADATA {
-        todo!()
-    }
+pub struct SoundThreadPool {
+    flowers: Vec<Flower>,
+    sender: Option<std::sync::mpsc::Sender<Message>>,
+    task_queue: Arc<Mutex<VecDeque<SoundTask>>>,
+    active_tasks: Arc<Mutex<usize>>,
 }
 
-pub enum WavError {
-    UnsupportedFormat(u16),
-    UnsupportedBitsPerSample(u16),
-    IoError(std::io::Error),
-    DecoderError(String),
-    ProbeError(String),
-    NoAudioStream,
+type JobFor = Box<dyn FnOnce() + Send + 'static>;
+
+enum Message {
+    NewJob(JobFor),
+    Terminate,
 }
 
-impl From<std::io::Error> for WavError {
-    fn from(err: std::io::Error) -> Self {
-        WavError::IoError(err)
-    }
+struct Flower {
+    id: usize,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
-pub fn get_audio_bit_rate<P: AsRef<Path>>(path: P) -> Result<u16, WavError> {
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let hint = Hint::new();
-    let format_opts = FormatOptions::default();
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &Default::default())
-        .map_err(|e| WavError::ProbeError(e.to_string()))?;
-    let track = probed.format.tracks().get(0).ok_or(WavError::NoAudioStream)?;
-    let bits = track.codec_params.bits_per_sample.unwrap_or(16) as u16;
-    match bits {
-        8 | 16 | 24 | 32 | 64 | 96 | 128 | 192 => Ok(bits),
-        _ => Err(WavError::UnsupportedBitsPerSample(bits))
-    }
-}
-
-pub fn decode_audio_samples<P: AsRef<Path>>(path: P) -> Result<Vec<f32>, WavError> {
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let hint = Hint::new();
-    let format_opts = FormatOptions::default();
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &Default::default())
-        .map_err(|e| WavError::ProbeError(e.to_string()))?;
-    let mut format = probed.format;
-    let track = format.tracks().get(0).ok_or(WavError::NoAudioStream)?;
-    let decoder_opts = DecoderOptions::default();
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &decoder_opts)
-        .map_err(|e| WavError::DecoderError(e.to_string()))?;
-    let mut samples = Vec::new();
-    let mut sample_buf = None;
-    while let Ok(packet) = format.next_packet() {
-        let decoded = decoder.decode(&packet).map_err(|e| WavError::DecoderError(e.to_string()))?;
-        if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::new(decoded.capacity() as u64, *decoded.spec()));
+impl SoundThreadPool {
+    pub fn new(size: usize) -> Result<SoundThreadPool> {
+        if size == 0 {
+            return Err(anyhow::anyhow!("Size of pool must be greater than zero!"));
         }
-        if let Some(buf) = &mut sample_buf {
-            buf.copy_interleaved_ref(decoded);
-            samples.extend(buf.samples().iter().copied().map(|s| {
-                match s {
-                    s if s > 1.0 => 1.0,
-                    s if s < -1.0 => -1.0,
-                    s => s
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let task_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let active_tasks = Arc::new(Mutex::new(0));
+        let mut flowers = Vec::with_capacity(size);
+        for id in 0..size {
+            flowers.push(Flower::new(
+                id,
+                Arc::clone(&receiver),
+                Arc::clone(&task_queue),
+                Arc::clone(&active_tasks),
+            ));
+        }
+        Ok(SoundThreadPool {
+            flowers,
+            sender: Some(sender),
+            task_queue,
+            active_tasks,
+        })
+    }
+    pub fn execute(
+        &self,
+        id: usize,
+        samples: Vec<f32>,
+        duration: Duration,
+        metadata: METADATA,
+        stereo: bool,
+    ) -> Result<()> {
+        let task = SoundTask {
+            id,
+            samples: Arc::new(samples),
+            duration,
+            metadata,
+            stereo,
+        };
+        let mut queue = self.task_queue.lock().map_err(|e| anyhow::anyhow!("Failure while locking task queue -> {}", e))?;
+        queue.push_back(task);
+        let sender = self.sender.as_ref().ok_or_else(|| anyhow::anyhow!("Channel is not available?"))?;
+        sender.send(Message::NewJob(Box::new(move || {
+        }))).map_err(|e| anyhow::anyhow!("Failed to send JobFor -> {}", e))?;
+        Ok(())
+    }
+    pub fn active_tasks(&self) -> Result<usize> {
+        let count = self.active_tasks.lock()
+            .map_err(|e| anyhow::anyhow!("Can't get active tasks count due to? ->  {}", e))?;
+        Ok(*count)
+    }
+    pub fn wait_all(&self) -> Result<()> {
+        loop {
+            let count = self.active_tasks()?;
+            if count == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    }
+}
+
+impl Flower {
+    fn new(
+        id: usize,
+        receiver: Arc<Mutex<std::sync::mpsc::Receiver<Message>>>,
+        task_queue: Arc<Mutex<VecDeque<SoundTask>>>,
+        active_tasks: Arc<Mutex<usize>>,
+    ) -> Flower {
+        let thread = thread::spawn(move || loop {
+            let message = receiver.lock().unwrap().recv().unwrap();
+
+            match message {
+                Message::NewJob(_) => {
+                    let task = {
+                        let mut queue = task_queue.lock().unwrap();
+                        queue.pop_front()
+                    };
+
+                    if let Some(task) = task {
+                        {
+                            let mut count = active_tasks.lock().unwrap();
+                            *count += 1;
+                        }
+                        if let Err(e) = output::play_samples(
+                            (*task.samples).clone(),
+                            task.duration,
+                            task.metadata,
+                            task.stereo,
+                        ) {
+                            eprintln!("Flower -> {} : Playback error? Maybe your samples is shit in? -> {}", id, e);
+                        }
+
+                        {
+                            let mut count = active_tasks.lock().unwrap();
+                            *count -= 1;
+                        }
+                    }
                 }
-            }));
+                Message::Terminate => break,
+            }
+        });
+
+        Flower {
+            id,
+            thread: Some(thread),
         }
     }
-
-    if samples.is_empty() {
-        return Err(WavError::DecoderError("File is empty!".to_string()));
+}
+impl Drop for SoundThreadPool {
+    fn drop(&mut self) {
+        if let Some(sender) = &self.sender {
+            for _ in &self.flowers {
+                sender.send(Message::Terminate).unwrap();
+            }
+        }
+        for flower in &mut self.flowers {
+            if let Some(thread) = flower.thread.take() {
+                thread.join().unwrap();
+            }
+        }
     }
-    Ok(samples)
 }
-
-pub fn read_audio_info<P: AsRef<Path>>(path: P) -> Result<METADATA, WavError> {
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let hint = Hint::new();
-    let format_opts = FormatOptions::default();
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &Default::default())
-        .map_err(|e| WavError::ProbeError(e.to_string()))?;
-    let track = probed.format.tracks().get(0).ok_or(WavError::NoAudioStream)?;
-    let params = &track.codec_params;
-    let sample_format = match params.bits_per_sample.unwrap_or(16) {
-        8 => SampleFormat::U8,
-        16 => SampleFormat::I16,
-        24 | 32 => SampleFormat::I32,
-        64 => SampleFormat::F64,
-        96 | 128 | 192 => SampleFormat::F64,
-        bits => return Err(WavError::UnsupportedBitsPerSample(bits as u16)),
-    };
-
-    Ok(METADATA {
-        sample_format,
-        sample_rate: params.sample_rate.unwrap_or(44100),
-        channels: params.channels.map(|c| c.count()).unwrap_or(2) as u16,
-    })
-}
-
