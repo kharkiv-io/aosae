@@ -21,6 +21,5 @@ At the moment, the engine supports the following functions and features :
 1. Make encoding and finalization support for all popular formats, such as :
 *  FLAC 
 *  OGG 
-*  MP3
-2. Create a bass generator 
-3. Creating sample generator from a pool of sounds 
+*  MP3 
+2. Creating sample generator from a pool of sounds 
