@@ -13,7 +13,8 @@ At the moment, the engine supports the following functions and features :
 *   Encoding and finalization of .wav files from samples
 *   Creating a pool of sounds from samples and then manipulating the sounds in the pool.
 *   Record microphone sound into samples.
-*   Decoder that supports almost any sample format and audio file formats.
+*   Decoder that supports almost any sample format and audio file formats. Thanks to Symphonia 
+https://github.com/pdeljanov/Symphonia
 *   Reading "metadata" from audio files.
 *   Create multitrack and manipulate ( tracks ) in 
 
