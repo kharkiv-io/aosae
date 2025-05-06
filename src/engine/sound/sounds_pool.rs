@@ -146,7 +146,8 @@ impl Flower {
                                 *count += 1;
                             }
                             let samples = create_samples_box((*task.samples).to_owned());
-                            play_samples_graph(samples, task.duration);
+                            play_samples_graph(samples);
+                            thread::sleep(task.duration);
                             {
                                 let mut count = active_tasks.lock().unwrap();
                                 *count -= 1;
