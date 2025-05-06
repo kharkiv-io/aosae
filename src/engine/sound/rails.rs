@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time;
 use std::time::Duration;
+
 #[derive(Debug)]
 pub struct Rails {
     rails: Vec<Rail>,
@@ -12,7 +13,7 @@ pub struct Rails {
 #[derive(Debug)]
 pub struct TrackPos {
     id: usize,
-    path: String,
+    samples: Vec<f32>,
     pos: f64,
 }
 #[derive(Debug)]
@@ -51,7 +52,7 @@ impl Rails {
                 .iter()
                 .map(|track| TrackPos {
                     id: track.id,
-                    path: track.path.clone(),
+                    samples: track.samples.clone(),
                     pos: track.pos,
                 })
                 .collect(),
@@ -59,10 +60,10 @@ impl Rails {
     }
 }
 impl TrackPos {
-    pub fn new(id: usize, path: String, pos: f64) -> Self {
+    pub fn new(id: usize, samples: Vec<f32>, pos: f64) -> Self {
         TrackPos {
             id: (id),
-            path: (path),
+            samples: (samples),
             pos: (pos),
         }
     }
@@ -75,7 +76,7 @@ impl TrackPos {
     pub fn clone(&self) -> TrackPos {
         TrackPos {
             id: self.id,
-            path: self.path.clone(),
+            samples: self.samples.clone(),
             pos: self.pos,
         }
     }
@@ -115,25 +116,21 @@ impl Timer {
 pub fn calc_and_start(
     pool: Arc<Result<SoundThreadPool, anyhow::Error>>,
     rail: Rail,
-    duration: f64,
+    samples: Vec<f32>,
+    dura: Duration,
     id_index: usize,
 ) {
-    thread::spawn(move || {
-        if let Ok(pool) = pool.as_ref() {
-            let decoded = decoder::decode_audio_samples(rail.tracks[(id_index)].path.clone());
-            if let Ok(decoded_samples) = decoded {
-                loop {
-                    pool.execute(
-                        rail.tracks.len(),
-                        decoded_samples.clone(),
-                        Duration::from_secs_f64(duration),
-                        Duration::from_secs_f64(rail.tracks[id_index].pos.clone()),
-                    );
-                    break;
-                }
-            } else {
-                println!("Failed to decode audio samples?");
-            }
+    if let Ok(pool) = pool.as_ref() {
+        loop {
+            pool.execute(
+                rail.tracks.len(),
+                samples.clone(),
+                dura,
+                Duration::from_secs_f64(rail.tracks[id_index].pos.clone()),
+            );
+            break;
         }
-    });
+    } else {
+        println!("Failed to decode audio samples?");
+    }
 }
