@@ -26,7 +26,7 @@ pub fn create_samples_box(samples: Vec<f32>) -> Box<dyn AudioUnit> {
     Box::new(synth)
 }
 
-pub fn play_samples_graph(audio_graph: Box<dyn AudioUnit>, d: Duration) {
+pub fn play_samples_graph(audio_graph: Box<dyn AudioUnit>) {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -47,7 +47,6 @@ pub fn play_samples_graph(audio_graph: Box<dyn AudioUnit>, d: Duration) {
         SampleFormat::I8 => run_synth::<i8>(audio_graph, device, config.into()),
         _ => panic!("Unsupported samples format?"),
     }
-    thread::sleep(d);
 }
 
 pub fn run_synth<T: SizedSample + FromSample<f64>>(
